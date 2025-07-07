@@ -39,8 +39,8 @@ if not os.path.exists(csv_path):
     st.error(f"❌ Fichier CSV manquant : {csv_path}")
     st.stop()
 
-df = pd.read_csv(csv_path, usecols=["com_insee", "nbr_accidents"])
-df["com_insee"] = df["com_insee"].astype(str).str.zfill(5)
+df = pd.read_csv(csv_path, dtype={"com_insee": str})
+df["com_insee"] = df["com_insee"].str.zfill(5)
 
 # -----------------------------
 # 3. Charger les géométries des communes
@@ -58,31 +58,44 @@ geo["com_insee"] = geo["com_insee"].astype(str).str.zfill(5)
 # 4. Fusion et filtrage
 # -----------------------------
 merged = geo.merge(df, on='com_insee', how='left')
-merged['nbr_accidents'] = merged['nbr_accidents'].fillna(0)
-filtered = merged[merged['nbr_accidents'] >= 1].sort_values(by='nbr_accidents', ascending=False)
+filtered = merged.dropna(subset=['nbr_accidents'])
+filtered = filtered[filtered['nbr_accidents'] >= 1].sort_values(by='nbr_accidents', ascending=False)
 
 if filtered.empty:
     st.warning("⚠️ Aucune commune avec au moins 1 accident pour ce mois.")
     st.stop()
 
-# -----------------------------
-# 5. Créer la carte Folium
-# -----------------------------
-m = folium.Map(location=[46.5, 2.5], zoom_start=6, tiles='CartoDB Dark_Matter')
-max_val = filtered['nbr_accidents'].max()
+# Total accidents
+total = int(filtered['nbr_accidents'].sum())
+st.markdown(f"### 🚧 Total d'accidents ce mois : **{total:,}**")
 
-import numpy as np
+# -----------------------------
+# 5. Choix du fond de carte
+# -----------------------------
+tile_option = st.selectbox(
+    "🗺️ Choix du fond de carte",
+    ['CartoDB positron', 'CartoDB Dark_Matter']
+)
 
-# Calcul des seuils dynamiques sûrs
+# -----------------------------
+# 6. Filtre interactif par nombre d'accidents
+# -----------------------------
+min_acc = st.slider("🔢 Filtrer les communes avec au moins X accidents", 1, int(filtered['nbr_accidents'].max()), 1)
+filtered = filtered[filtered['nbr_accidents'] >= min_acc]
+
+# -----------------------------
+# 7. Créer la carte Folium
+# -----------------------------
+m = folium.Map(location=[46.5, 2.5], zoom_start=6, tiles=tile_option)
+
 max_val = int(filtered['nbr_accidents'].max())
-
 if max_val <= 10:
-    thresholds = list(range(1, max_val + 2))  # ex : [1, 2, ..., max+1]
+    thresholds = list(range(1, max_val + 2))
 else:
-    # 6 bins linéaires + une borne max + 1
     thresholds = list(np.linspace(1, max_val, 6, dtype=int))
     thresholds = sorted(set(thresholds + [max_val + 1]))
-
+if max_val >= thresholds[-1]:
+    thresholds.append(max_val + 1)
 
 folium.Choropleth(
     geo_data=filtered.__geo_interface__,
@@ -94,32 +107,55 @@ folium.Choropleth(
     line_opacity=0.1,
     legend_name=f"Accidents – Mois {mois_select}",
     threshold_scale=thresholds,
-    bins=thresholds,  # Ajout essentiel
-    nan_fill_color='white',
-    nan_fill_opacity=0.4
+    bins=thresholds,
 ).add_to(m)
 
+# Infobulles simplifiées
 for _, row in filtered.iterrows():
-    nom = row.get("nom_commune", "Inconnu")
-    accidents = int(row.get("nbr_accidents", 0))
-    geom = row.get("geometry", None)
-
-    if geom is not None:
-        folium.GeoJson(
-            geom,
-            style_function=lambda x: {"fillOpacity": 0, "color": "transparent"},
-            tooltip=folium.Tooltip(f"{nom} : {accidents} accident(s)")
+    nom = row["nom_commune"]
+    acc = int(row["nbr_accidents"])
+    veh = int(row.get("nbr_vehicules", 0))
+    geom = row["geometry"]
+    if geom and geom.centroid:
+        lat, lon = geom.centroid.y, geom.centroid.x
+        tooltip = f"{nom} : {acc} accident(s), {veh} véhicule(s)"
+        folium.CircleMarker(
+            location=[lat, lon],
+            radius=3 + (acc ** 0.5),
+            color="red",
+            fill=True,
+            fill_opacity=0.6,
+            tooltip=tooltip
         ).add_to(m)
 
 # -----------------------------
-# 6. Affichage dans Streamlit
+# 8. Affichage dans Streamlit
 # -----------------------------
 st.subheader(f"🗺️ Carte interactive – Mois {mois_select}")
 st_folium(m, width=1000, height=700, returned_objects=[])
 
 # -----------------------------
-# 7. Tableau des données
+# 9. Tableau des données
 # -----------------------------
 st.subheader(f"📊 Top 20 des communes avec le plus d'accidents – Mois {mois_select}")
-df_display = filtered[['com_insee', 'nom_commune', 'nbr_accidents']]
+df_display = filtered[['com_insee', 'nom_commune', 'nbr_accidents', 'nbr_vehicules']]
 st.dataframe(df_display.head(20))
+
+# -----------------------------
+# 10. Téléchargement CSV
+# -----------------------------
+st.download_button(
+    label="📥 Télécharger les données du mois (CSV)",
+    data=df_display.to_csv(index=False),
+    file_name=f"accidents_mois_{mois_select}.csv",
+    mime="text/csv"
+)
+
+# -----------------------------
+# 11. Histogramme des classes
+# -----------------------------
+st.subheader("📈 Répartition des communes par classe d'accidents")
+bins = pd.cut(filtered['nbr_accidents'], bins=thresholds)
+hist = bins.value_counts().sort_index()
+hist_df = pd.DataFrame({'Classe': hist.index.astype(str), 'Nombre de communes': hist.values})
+st.bar_chart(hist_df.set_index('Classe'))
