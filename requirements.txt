@@ -1,0 +1,8 @@
+pandas
+folium
+pyspark
+sqlalchemy
+geopandas
+psycopg2-binary
+streamlit
+streamlit-folium
